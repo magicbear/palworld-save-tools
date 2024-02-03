@@ -20,10 +20,6 @@ Some fields that are not currently parsed:
 1. `BaseCampSaveData.Value.ModuleMap`
 1. `MapObjectSaveData.MapObjectSaveData.ConcreteModel`
 
-## Converting co-op saves to dedicated server saves
-
-Please follow the instructions provided over at https://github.com/xNul/palworld-host-save-fix
-
 ## Instructions
 
 > [!IMPORTANT]
@@ -64,34 +60,33 @@ Additional command line arguments:
 1. `--minify-json`: Minify output JSON to help speed up processing by other tools consuming JSON
 1. `--force`: Overwrite output files if they exist without prompting
 
-### Cleanup Tools
+## Developers
 
-This tools is for cleanup the unreference item, rename the player name, migrate player and delete the player.
+This library is available on PyPi, and can be installed with
 
-- For cleaning the capture log in guild, use the follow command `python palworld-cleanup-tools.py --fix-missing --fix-capture Level.sav`
+```shell
+pip install palworld-save-tools
+```
 
-- For modifiy the `Level.sav` file, use the follow command
-`python -i palworld-cleanup-tools.py Level.sav`
+> [!NOTE]
+> Due to ongoing rapid development and the potential for breaking changes, the recommendation is to pin to a specific version, and take updates as necessary.
 
-	- `ShowPlayers()` - List the Players
-	- `FixMissing()` - Remove missing player instance
-	- `ShowGuild(fix_capture=False)` - List the Guild and members
-	- `RenamePlayer(uid,new_name)` - Rename player to new_name
-	- `DeletePlayer(uid,InstanceId=None, dry_run=False)` - Wipe player data from save InstanceId: delete specified InstanceId
-	- `EditPlayer(uid)` - Allocate player base meta data to variable `player`
-	- `OpenBackup(filename)` - Open Backup Level.sav file and assign to backup_wsd
-	- `MigratePlayer(old_uid,new_uid)` - Migrate the player from old PlayerUId to new PlayerUId
-	- `CopyPlayer(old_uid,new_uid, backup_wsd)` - Copy the player from old PlayerUId to new PlayerUId `backup_wsd is the OpenBackup file, wsd is current file`
-	- `Save()` - Save the file and exit
+## Roadmap
 
-Migrate difference server to single server sample:
+- [ ] Parse all known blobs of data
+- [ ] Optimize CPU and memory usage
 
-1. The player login to the new server to create player instance for new server, and then stop the server
-1. Copy old server `Level.sav` to `SaveGames/0/<Server ID>/Old-Level.sav`
-1. Copy old server `Players/xxxxxxxx-0000-0000-0000-000000000000.sav` to `SaveGames/0/<Server ID>/Players/xxxxxxxx-0000-0000-0000-000000000001.sav`
-1. Use interactive mode `python -i palworld-cleanup-tools.py Level.sav`
-1. Use following command `OpenBackup("Old-Level.sav")`
-1. Next step `CopyPlayer("xxxxxxxx-0000-0000-0000-000000000001", "xxxxxxxx-0000-0000-0000-000000000000", backup_wsd)` for every require to migrate player
-1. Next step `Save()`
-1. And remove all the old `-000000000001.sav`, rename `Level_fixed.sav` to `Level.sav` and start the Palworld Server.
+## Development philosophy
 
+- No additional dependencies. Scripts should run with a default install of Python. Distributing binary builds of Python is laden with AV false positives.
+- Correctness of the conversion process is more important than performance. SAV > JSON > SAV should yield bit-for-bit identical files (pre-compression).
+
+## Projects that make use of palworld-save-tools
+
+> [!NOTE]
+> This does not serve as an endorsement of any of these projects, use at your own risk.
+
+- [xNul/palworld-host-save-fix](https://github.com/xNul/palworld-host-save-fix/) - Migrating save data between player IDs (eg, converting coop saves to dedicated server saves)
+- [PalEdit](https://github.com/EternalWraith/PalEdit) - GUI for editing Pals
+- [palworld-server-tool](https://github.com/zaigie/palworld-server-tool) - Managing dedicated servers via RCON and SAV file parsing
+- [magicbear/palworld-save-tools](https://github.com/magicbear/palworld-save-tools/tree/clenaup-tools) - Assorted set of SAV file manipulations
