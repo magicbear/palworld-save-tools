@@ -2,15 +2,20 @@
 # Author: MagicBear
 # License: MIT License
 
-import glob, os, datetime, zlib, subprocess
+import glob, os, datetime, time, zlib, subprocess
 from operator import itemgetter, attrgetter
 import json
 import os
 import sys
-from lib.gvas import GvasFile
-from lib.palsav import compress_gvas_to_sav, decompress_sav_to_gvas
-from lib.paltypes import PALWORLD_CUSTOM_PROPERTIES, PALWORLD_TYPE_HINTS
-from lib.archive import *
+
+module_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(module_dir, "save_tools"))
+sys.path.insert(0, os.path.join(module_dir, "palworld-save-tools"))
+
+from palworld_save_tools.gvas import GvasFile
+from palworld_save_tools.palsav import compress_gvas_to_sav, decompress_sav_to_gvas
+from palworld_save_tools.paltypes import PALWORLD_CUSTOM_PROPERTIES, PALWORLD_TYPE_HINTS
+from palworld_save_tools.archive import *
 import pprint
 import uuid
 import argparse
@@ -23,11 +28,132 @@ gvas_file = None
 backup_gvas_file = None
 backup_wsd = None
 playerMapping = None
+guildInstanceMapping = None
 instanceMapping = None
 output_path = None
 args = None
 player = None
 filetime = None
+
+def skip_decode(
+    reader: FArchiveReader, type_name: str, size: int, path: str
+) -> dict[str, Any]:
+    if type_name == "ArrayProperty":
+        array_type = reader.fstring()
+        value = {
+            "skip_type": type_name,
+            "array_type": array_type,
+            "id": reader.optional_guid(),
+            "value": reader.read(size),
+        }
+    elif type_name == "MapProperty":
+        key_type = reader.fstring()
+        value_type = reader.fstring()
+        _id = reader.optional_guid()
+        value = {
+            "skip_type": type_name,
+            "key_type": key_type,
+            "value_type": value_type,
+            "id": _id,
+            "value": reader.read(size),
+        }
+    elif type_name == "StructProperty":
+        value = {
+            "skip_type": type_name,
+            "struct_type": reader.fstring(),
+            "struct_id": reader.guid(),
+            "id": reader.optional_guid(),
+            "value": reader.read(size),
+        }
+    else:
+        raise Exception(f"Expected ArrayProperty or StructProperty, got {type_name} in {path}")
+    return value
+
+def skip_encode(
+    writer: FArchiveWriter, property_type: str, properties: dict[str, Any]
+) -> int:
+    if property_type == "ArrayProperty":
+        del properties["custom_type"]
+        del properties["skip_type"]
+        writer.fstring(properties["array_type"])
+        writer.optional_guid(properties.get("id", None))
+        writer.write(properties['value'])
+        return len(properties['value'])
+    elif property_type == "MapProperty":
+        del properties["custom_type"]
+        del properties["skip_type"]
+        writer.fstring(properties["key_type"])
+        writer.fstring(properties["value_type"])
+        writer.optional_guid(properties.get("id", None))
+        writer.write(properties['value'])
+        return len(properties['value'])
+    elif property_type == "StructProperty":
+        del properties["custom_type"]
+        del properties["skip_type"]
+        writer.fstring(properties["struct_type"])
+        writer.guid(properties["struct_id"])
+        writer.optional_guid(properties.get("id", None))
+        writer.write(properties['value'])
+        return len(properties['value'])
+    else:
+        raise Exception(f"Expected ArrayProperty or StructProperty, got {property_type} in {path}")
+
+def load_skiped_decode(wsd, skip_paths):
+    if isinstance(skip_paths, str):
+        skip_paths = [skip_paths]
+    for skip_path in skip_paths:
+        properties = wsd[skip_path]
+        if "skip_type" not in properties:
+            return
+
+        print("Parsing worldSaveData.%s..." % skip_path, end="", flush=True)
+        with FArchiveReader(
+                properties['value'], PALWORLD_TYPE_HINTS, PALWORLD_CUSTOM_PROPERTIES
+            ) as reader:
+            if properties["skip_type"] == "ArrayProperty":
+                properties['value'] = reader.array_property(properties["array_type"], len(properties['value']) - 4, ".worldSaveData.%s" % skip_path)
+            elif properties["skip_type"] == "StructProperty":
+                properties['value'] = reader.struct_value(properties['struct_type'], ".worldSaveData.%s" % skip_path)
+            elif properties["skip_type"] == "MapProperty":
+                reader.u32()
+                count = reader.u32()
+                path = ".worldSaveData.%s" % skip_path
+                key_path = path + ".Key"
+                key_type = properties['key_type']
+                value_type = properties['value_type']
+                if key_type == "StructProperty":
+                    key_struct_type = reader.get_type_or(key_path, "Guid")
+                else:
+                    key_struct_type = None
+                value_path = path + ".Value"
+                if value_type == "StructProperty":
+                    value_struct_type = reader.get_type_or(value_path, "StructProperty")
+                else:
+                    value_struct_type = None
+                values: list[dict[str, Any]] = []
+                for _ in range(count):
+                    key = reader.prop_value(key_type, key_struct_type, key_path)
+                    value = reader.prop_value(value_type, value_struct_type, value_path)
+                    values.append(
+                        {
+                            "key": key,
+                            "value": value,
+                        }
+                    )
+                properties["key_struct_type"] = key_struct_type
+                properties["value_struct_type"] = value_struct_type
+                properties["value"] = values
+            del properties['custom_type']
+            del properties["skip_type"]
+        del PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.%s" % skip_path]
+        print("Done")
+
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.MapObjectSaveData"] = (skip_decode, skip_encode)
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.FoliageGridSaveDataMap"] = (skip_decode, skip_encode)
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.MapObjectSpawnerInStageSaveData"] = (skip_decode, skip_encode)
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.ItemContainerSaveData"] = (skip_decode, skip_encode)
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.DynamicItemSaveData"] = (skip_decode, skip_encode)
+PALWORLD_CUSTOM_PROPERTIES[".worldSaveData.CharacterContainerSaveData"] = (skip_decode, skip_encode)
 
 def main():
     global wsd, output_file, gvas_file, playerMapping, instanceMapping, output_path, args, filetime
@@ -53,6 +179,11 @@ def main():
         help="Fix the too many capture logs (not need after 1.4.0)",
     )
     parser.add_argument(
+        "--fix-duplicate",
+        action="store_true",
+        help="Fix duplicate user data",
+    )
+    parser.add_argument(
         "--output",
         "-o",
         help="Output file (default: <filename>_fixed.sav)",
@@ -76,31 +207,38 @@ def main():
         raw_gvas, _ = decompress_sav_to_gvas(data)
 
         print(f"Parsing {args.filename}...", end="", flush=True)
+        start_time = time.time()
         gvas_file = GvasFile.read(raw_gvas, PALWORLD_TYPE_HINTS, PALWORLD_CUSTOM_PROPERTIES)
-        print("Done.")
+        print("Done in %.1fs." % (time.time() - start_time))
 
     wsd = gvas_file.properties['worldSaveData']['value']
 
     if args.statistics:
-        for key in wsd:
-            print("%40s\t%.3f MB" % (key, len(str(wsd[key])) / 1048576))
+        Statistics()
 
-    ShowPlayers()
-    if args.fix_missing:
-        FixMissing()
-
-    ShowGuild(fix_capture=args.fix_capture)
-
-    if not args.output:
+    if args.output is None:
         output_path = args.filename.replace(".sav", "_fixed.sav")
     else:
         output_path = args.output
 
+    ShowGuild()
+    ShowPlayers()
+
+    if args.fix_missing:
+        FixMissing()
+    if args.fix_capture:
+        FixCaptureLog()
+    if args.fix_duplicate:
+        FixDuplicateUser()
+
     if sys.flags.interactive:
         print("Go To Interactive Mode (no auto save), we have follow command:")
         print("  ShowPlayers()                              - List the Players")
-        print("  FixMissing()                               - Remove missing player instance")
-        print("  ShowGuild(fix_capture=False)               - List the Guild and members")
+        print("  FixMissing(dry_run=False)                  - Remove missing player instance")
+        print("  FixCaptureLog(dry_run=False)               - Remove unused capture log")
+        print("  FixDuplicateUser(dry_run=False)            - Remove duplicate player instance")
+        print("  ShowGuild()                                - List the Guild and members")
+        print("  BindGuildInstanceId(uid,instance_id)       - Update Guild binding instance for user")
         print("  RenamePlayer(uid,new_name)                 - Rename player to new_name")
         print("  DeletePlayer(uid,InstanceId=None,          ")
         print("               dry_run=False)                - Wipe player data from save")
@@ -115,6 +253,7 @@ def main():
         print("  CopyPlayer(old_uid,new_uid, backup_wsd)    - Copy the player from old PlayerUId to new PlayerUId ")
         print("                                               Note: be sure you have already use the new playerUId to ")
         print("                                               login the game.")
+        print("  Statistics()                               - Counting wsd block data size")
         print("  Save()                                     - Save the file and exit")
         print()
         print("Advance feature:")
@@ -125,6 +264,10 @@ def main():
 
     if args.fix_missing or args.fix_capture:
         Save()
+
+def Statistics():
+    for key in wsd:
+        print("%40s\t%.3f MB\tKey: %d" % (key, len(str(wsd[key])) / 1048576, len(wsd[key]['value'])))
 
 def EditPlayer(player_uid):
     global player
@@ -164,8 +307,9 @@ def OpenBackup(filename):
         raw_gvas, _ = decompress_sav_to_gvas(data)
 
         print(f"Parsing {filename}...", end="", flush=True)
+        start_time = time.time()
         backup_gvas_file = GvasFile.read(raw_gvas, PALWORLD_TYPE_HINTS, PALWORLD_CUSTOM_PROPERTIES)
-        print("Done.")
+        print("Done in %.1fs." % (time.time() - start_time))
     backup_wsd = backup_gvas_file.properties['worldSaveData']['value']
 
 
@@ -173,6 +317,7 @@ def to_storage_uuid(uuid_str):
     return UUID.from_str(str(uuid_str))
 
 def CopyPlayer(player_uid, new_player_uid, old_wsd, dry_run=False):
+    load_skiped_decode(['ItemContainerSaveData', 'CharacterContainerSaveData'])
     player_sav_file = os.path.dirname(os.path.abspath(args.filename)) + "/Players/" + player_uid.upper().replace("-",
                                                                                                                  "") + ".sav"
     new_player_sav_file = os.path.dirname(
@@ -369,11 +514,16 @@ def CopyPlayer(player_uid, new_player_uid, old_wsd, dry_run=False):
             f.write(sav_file)
 
 def MigratePlayer(player_uid, new_player_uid):
+    load_skiped_decode(wsd, ['MapObjectSaveData'])
+
     player_sav_file = os.path.dirname(os.path.abspath(args.filename)) + "/Players/" + player_uid.upper().replace("-","") + ".sav"
     new_player_sav_file = os.path.dirname(os.path.abspath(args.filename)) + "/Players/" + new_player_uid.upper().replace("-","") + ".sav"
     DeletePlayer(new_player_uid)
-    if not os.path.exists(player_sav_file) or not os.path.exists(new_player_sav_file):
+    if not os.path.exists(player_sav_file):
         print("\033[33mWarning: Player Sav file Not exists: %s\033[0m" % player_sav_file)
+        return
+    elif not os.path.exists(new_player_sav_file):
+        print("\033[33mWarning: Player Sav file Not exists: %s\033[0m" % new_player_sav_file)
         return
     else:
         with open(player_sav_file, "rb") as f:
@@ -444,6 +594,9 @@ def MigratePlayer(player_uid, new_player_uid):
     print("Finish to migrate player from Save, please delete this file manually: %s" % player_sav_file)
 
 def DeletePlayer(player_uid, InstanceId = None, dry_run=False):
+    load_skiped_decode(wsd, ['ItemContainerSaveData', 'CharacterContainerSaveData'])
+    if isinstance(player_uid, int):
+        player_uid = str(uuid.UUID("%08x-0000-0000-0000-000000000000" % player_uid))
     player_sav_file = os.path.dirname(os.path.abspath(args.filename)) + "/Players/" + player_uid.upper().replace("-",
                                                                                                                  "") + ".sav"
     player_container_ids = []
@@ -625,9 +778,16 @@ def ShowPlayers():
                     playerMeta[player_k] = playerParams[player_k]['value']
                 playerMeta['InstanceId'] = item['key']['InstanceId']['value']
                 playerMapping[str(item['key']['PlayerUId']['value'])] = playerMeta
-            print("PlayerUId \033[32m %s \033[0m [InstanceID \033[33m %s \033[0m] -> Level %2d  %s" % (
-                item['key']['PlayerUId']['value'], playerMeta['InstanceId'],
-                playerMeta['Level'] if 'Level' in playerMeta else -1, playerMeta['NickName']))
+            try:
+                print("PlayerUId \033[32m %s \033[0m [InstanceID %s %s \033[0m] -> Level %2d  %s" % (
+                    item['key']['PlayerUId']['value'], "\033[33m" if str(item['key']['PlayerUId']['value']) in guildInstanceMapping and
+                    str(playerMeta['InstanceId']) == guildInstanceMapping[str(item['key']['PlayerUId']['value'])] else "\033[31m", playerMeta['InstanceId'],
+                    playerMeta['Level'] if 'Level' in playerMeta else -1, playerMeta['NickName']))
+            except KeyError:
+                print("PlayerUId \033[32m %s \033[0m [InstanceID %s %s \033[0m] -> Level %2d" % (
+                    item['key']['PlayerUId']['value'], "\033[33m" if str(item['key']['PlayerUId']['value']) in guildInstanceMapping and
+                    str(playerMeta['InstanceId']) == guildInstanceMapping[str(item['key']['PlayerUId']['value'])] else "\033[31m", playerMeta['InstanceId'],
+                    playerMeta['Level'] if 'Level' in playerMeta else -1))
         else:
             # Non Player
             player = item['value']['RawData']['value']['object']['SaveParameter']
@@ -655,6 +815,45 @@ def FixMissing(dry_run=False):
             wsd['CharacterSaveParameterMap']['value'].remove(item)
 
 
+def FixCaptureLog(dry_run=False):
+    for group_data in wsd['GroupSaveDataMap']['value']:
+        if str(group_data['value']['GroupType']['value']['value']) == "EPalGroupType::Guild":
+            item = group_data['value']['RawData']['value']
+            removeItems = []
+            for ind_char in item['individual_character_handle_ids']:
+                if str(ind_char['instance_id']) not in instanceMapping:
+                    print("    \033[31mInvalid Character %s\033[0m" % (str(ind_char['instance_id'])))
+                    removeItems.append(ind_char)
+            print("After remove character count: %d" % (len(
+                group_data['value']['RawData']['value']['individual_character_handle_ids']) - len(removeItems)))
+            if dry_run:
+                for rm_item in removeItems:
+                    item['individual_character_handle_ids'].remove(rm_item)
+
+
+def FixDuplicateUser(dry_run=False):
+    # Remove Unused in CharacterSaveParameterMap
+    removeItems = []
+    for item in wsd['CharacterSaveParameterMap']['value']:
+        if "00000000-0000-0000-0000-000000000000" != str(item['key']['PlayerUId']['value']):
+            player_meta = item['value']['RawData']['value']['object']['SaveParameter']['value']
+            if str(item['key']['PlayerUId']['value']) not in guildInstanceMapping:
+                print(
+                    "\033[31mInvalid player on CharacterSaveParameterMap\033[0m  PlayerUId: %s  InstanceID: %s  Nick: %s" % (
+                        str(item['key']['PlayerUId']['value']), str(item['key']['InstanceId']['value']),
+                    str(player_meta['NickName']['value'])))
+                removeItems.append(item)
+            elif str(item['key']['InstanceId']['value']) != guildInstanceMapping[str(item['key']['PlayerUId']['value'])]:
+                print(
+                    "\033[31mDuplicate player on CharacterSaveParameterMap\033[0m  PlayerUId: %s  InstanceID: %s  Nick: %s" % (
+                        str(item['key']['PlayerUId']['value']), str(item['key']['InstanceId']['value']),
+                    str(player_meta['NickName']['value'])))
+                removeItems.append(item)
+    if not dry_run:
+        for item in removeItems:
+            wsd['CharacterSaveParameterMap']['value'].remove(item)
+
+
 def TickToHuman(tick):
     seconds = (wsd['GameTimeSaveData']['value']['RealDateTimeTicks']['value'] - tick) / 1e7
     s = ""
@@ -675,8 +874,20 @@ def TickToLocal(tick):
     t = datetime.datetime.fromtimestamp(ts)
     return t.strftime("%Y-%m-%d %H:%M:%S")
 
+def BindGuildInstanceId(uid, instance_id):
+    for group_data in wsd['GroupSaveDataMap']['value']:
+        if str(group_data['value']['GroupType']['value']['value']) == "EPalGroupType::Guild":
+            item = group_data['value']['RawData']['value']
+            for ind_char in item['individual_character_handle_ids']:
+                if str(ind_char['guid']) == uid:
+                    print("Update Guild %s binding guild UID %s  %s -> %s" % (item['guild_name'], uid, ind_char['instance_id'], instance_id))
+                    ind_char['instance_id'] = to_storage_uuid(uuid.UUID(instance_id))
+                    guildInstanceMapping[str(ind_char['guid'])] = str(ind_char['instance_id'])
+            print()
 
-def ShowGuild(fix_capture=False):
+def ShowGuild():
+    global guildInstanceMapping
+    guildInstanceMapping = {}
     # Remove Unused in GroupSaveDataMap
     for group_data in wsd['GroupSaveDataMap']['value']:
         # print("%s %s" % (group_data['key'], group_data['value']['GroupType']['value']['value']))
@@ -695,25 +906,8 @@ def ShowGuild(fix_capture=False):
                     player['player_info']['player_name'], str(player['player_uid']),
                     TickToLocal(player['player_info']['last_online_real_time']),
                     TickToHuman(player['player_info']['last_online_real_time'])))
-            removeItems = []
             for ind_char in mapObjectMeta['individual_character_handle_ids']:
-                if str(ind_char['instance_id']) in instanceMapping:
-                    character = \
-                        instanceMapping[str(ind_char['instance_id'])]['value']['RawData']['value']['object'][
-                            'SaveParameter'][
-                            'value']
-                    # if 'NickName' in character:
-                    #     print("    Player %s -> %s" % (str(ind_char['instance_id']), character['NickName']['value']))
-                    # else:
-                    #     print("    Character %s -> %s" % (str(ind_char['instance_id']), character['CharacterID']['value']))
-                else:
-                    print("    \033[31mInvalid Character %s\033[0m" % (str(ind_char['instance_id'])))
-                    removeItems.append(ind_char)
-            print("After remove character count: %d" % (len(
-                group_data['value']['RawData']['value']['individual_character_handle_ids']) - len(removeItems)))
-            if fix_capture:
-                for rmitem in removeItems:
-                    item['individual_character_handle_ids'].remove(rmitem)
+                guildInstanceMapping[str(ind_char['guid'])] = str(ind_char['instance_id'])
             print()
         # elif str(group_data['value']['GroupType']['value']['value']) == "EPalGroupType::Neutral":
         #     item = group_data['value']['RawData']['value']
@@ -789,6 +983,7 @@ def Save():
     with open(output_path, "wb") as f:
         f.write(sav_file)
     print("Done")
+    print("File saved to %s" % output_path)
 
     sys.exit(0)
 
