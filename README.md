@@ -7,4 +7,4 @@ Please referer to https://github.com/cheahjs/palworld-save-tools
 
 ## For cleanup-tools
 
-Moved to https://github.com/magicbear/palworld-server-toolkit
+Instructions referer to https://github.com/magicbear/palworld-server-toolkit
